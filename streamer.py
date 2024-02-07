@@ -4,6 +4,8 @@ from lossy_socket import LossyUDP
 from socket import INADDR_ANY
 import struct
 import concurrent.futures
+import traceback
+import time
 
 class Streamer:
     def __init__(self, dst_ip, dst_port,
@@ -20,7 +22,11 @@ class Streamer:
         
         #a dict of the seq number and byte value
         self.buffer = {}
-        self.receive_buffer = []
+        
+        #keep a list of keys(seq number) and acks
+        
+        self.recived_acks = {}
+        
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         executor.submit(self.listener)
 
@@ -29,24 +35,45 @@ class Streamer:
             try:
                 data, addr = self.socket.recvfrom()
                 if data != b'':
-                    unpacked_value = struct.unpack('i', data[:4])
-
-                    # The rest is the list of bytes
-                    byte_list_unpacked = data[4:]
+                    #unpacked_value = struct.unpack('i', data[:4])
                     
-                    print(unpacked_value[0],byte_list_unpacked)
-                    self.buffer[unpacked_value[0]] = byte_list_unpacked
+                    #print(data[4])
+                    #unpacked_ack = struct.unpack('?', data[4])
+                    #print(unpacked_ack)
+                    
+                    unpacked_headers = struct.unpack('i?', data[:5])
+                    received_seq_num = unpacked_headers[0]
+                    is_ack = unpacked_headers[1]
+                    print(received_seq_num,is_ack)
+                    
+                    
+                    if is_ack:
+                        print("this is an ack")
+                        self.recived_acks[received_seq_num] = True
+                    else:
+                        
+                        # The rest is the list of bytes
+                        byte_list_unpacked = data[5:]
+                        self.buffer[received_seq_num] = byte_list_unpacked
+                        print("sending ack")
+                        headers = struct.pack('i?', received_seq_num, True)
+                        self.socket.sendto(headers, (self.dst_ip, self.dst_port))
+                        
                 
             except Exception as e:
                 print("listener died!")
                 print(e)
+                traceback.print_exc()
 
     def send(self, data_bytes: bytes) -> None:
         """Note that data_bytes can be larger than one packet."""
         # Your code goes here!  The code below should be changed!
         # for now I'm just sending the raw application-level data in one UDP payload
         segmented_bytes = []
-        header_size = 4
+        header_size = 5
+        
+        
+        
         while (len(data_bytes) > 1472 - header_size):
             new_segment = data_bytes[:1472 - header_size]
             segmented_bytes.append(new_segment)
@@ -56,9 +83,18 @@ class Streamer:
             segmented_bytes.append(data_bytes)
         
         for segment in segmented_bytes:
-            packed_value = struct.pack('i', self.seq_num)
-            packed_data = packed_value + segment
+            #packed_value = struct.pack('i', self.seq_num)
+            #is_ack_value = struct.pack("?", False)
+            headers = struct.pack('i?', self.seq_num, False)
+            
+            packed_data = headers + segment
             self.socket.sendto(packed_data, (self.dst_ip, self.dst_port))
+            
+            
+            #wait until i get an ack for the packet that I just sent
+            while self.seq_num not in self.recived_acks:
+                time.sleep(0.01)
+            
             self.seq_num += 1
 
     def recv(self) -> bytes:
@@ -75,7 +111,7 @@ class Streamer:
 
         #wait until buffer populates
         while self.expect_recieve not in self.buffer:
-            continue
+            time.sleep(0.01)
         
         
         #while self.expect_recieve not in self.buffer:
