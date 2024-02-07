@@ -19,6 +19,7 @@ class Streamer:
         self.seq_num = 0
         self.expect_recieve = 0
         self.closed = False
+        self.header_size = 6
         
         #a dict of the seq number and byte value
         self.buffer = {}
@@ -41,10 +42,11 @@ class Streamer:
                     #unpacked_ack = struct.unpack('?', data[4])
                     #print(unpacked_ack)
                     
-                    unpacked_headers = struct.unpack('i?', data[:5])
+                    unpacked_headers = struct.unpack('i??', data[:self.header_size])
                     received_seq_num = unpacked_headers[0]
                     is_ack = unpacked_headers[1]
-                    print(received_seq_num,is_ack)
+                    is_fin = unpacked_headers[2]
+                    print(received_seq_num,is_ack,is_fin)
                     
                     
                     if is_ack:
@@ -53,10 +55,11 @@ class Streamer:
                     else:
                         
                         # The rest is the list of bytes
-                        byte_list_unpacked = data[5:]
+                        print("this is a data packet")
+                        byte_list_unpacked = data[self.header_size:]
                         self.buffer[received_seq_num] = byte_list_unpacked
                         print("sending ack")
-                        headers = struct.pack('i?', received_seq_num, True)
+                        headers = struct.pack('i??', received_seq_num, True, False)
                         self.socket.sendto(headers, (self.dst_ip, self.dst_port))
                         
                 
@@ -70,14 +73,13 @@ class Streamer:
         # Your code goes here!  The code below should be changed!
         # for now I'm just sending the raw application-level data in one UDP payload
         segmented_bytes = []
-        header_size = 5
         
         
         
-        while (len(data_bytes) > 1472 - header_size):
-            new_segment = data_bytes[:1472 - header_size]
+        while (len(data_bytes) > 1472 - self.header_size):
+            new_segment = data_bytes[:1472 - self.header_size]
             segmented_bytes.append(new_segment)
-            data_bytes = data_bytes[1472 - header_size:]
+            data_bytes = data_bytes[1472 - self.header_size:]
         
         if len(data_bytes) > 0:
             segmented_bytes.append(data_bytes)
@@ -85,7 +87,9 @@ class Streamer:
         for segment in segmented_bytes:
             #packed_value = struct.pack('i', self.seq_num)
             #is_ack_value = struct.pack("?", False)
-            headers = struct.pack('i?', self.seq_num, False)
+
+            
+            headers = struct.pack('i??', self.seq_num, False, False)
             
             packed_data = headers + segment
             self.socket.sendto(packed_data, (self.dst_ip, self.dst_port))
