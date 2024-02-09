@@ -17,7 +17,7 @@ class Streamer:
         self.dst_ip = dst_ip
         self.dst_port = dst_port
         self.seq_num = 0
-        self.expect_recieve = 0
+        self.expect_receive = 0
         self.closed = False
         self.header_size = 6
         
@@ -26,7 +26,7 @@ class Streamer:
         
         #keep a list of keys(seq number) and acks
         
-        self.recived_acks = {}
+        self.received_acks = {}
         
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         executor.submit(self.listener)
@@ -51,7 +51,13 @@ class Streamer:
                     
                     if is_ack:
                         print("this is an ack")
-                        self.recived_acks[received_seq_num] = True
+                        self.received_acks[received_seq_num] = True
+
+                    elif is_fin:
+                        print("this is a fin, sending fin-ack")
+                        headers = struct.pack('i??', received_seq_num, True, True)
+                        self.socket.sendto(headers, (self.dst_ip, self.dst_port))
+                        
                     else:
                         
                         # The rest is the list of bytes
@@ -83,6 +89,7 @@ class Streamer:
         
         if len(data_bytes) > 0:
             segmented_bytes.append(data_bytes)
+
         
         for segment in segmented_bytes:
             #packed_value = struct.pack('i', self.seq_num)
@@ -94,10 +101,14 @@ class Streamer:
             packed_data = headers + segment
             self.socket.sendto(packed_data, (self.dst_ip, self.dst_port))
             
-            
+            timeout = 0.25
+            start_time = time.time()
             #wait until i get an ack for the packet that I just sent
-            while self.seq_num not in self.recived_acks:
-                time.sleep(0.01)
+            while self.seq_num not in self.received_acks:
+                if time.time() - start_time > timeout:
+                    self.socket.sendto(packed_data, (self.dst_ip, self.dst_port))
+                    start_time = time.time()
+
             
             self.seq_num += 1
 
@@ -114,12 +125,12 @@ class Streamer:
         
 
         #wait until buffer populates
-        while self.expect_recieve not in self.buffer:
+        while self.expect_receive not in self.buffer:
             time.sleep(0.01)
         
         
-        #while self.expect_recieve not in self.buffer:
-        #data = self.buffer[self.expect_recieve]
+        #while self.expect_receive not in self.buffer:
+        #data = self.buffer[self.expect_receive]
         #unpacked_value = struct.unpack('i', data[:4])
 
         # The rest is the list of bytes
@@ -131,13 +142,29 @@ class Streamer:
     
         # For now, I'll just pass the full UDP payload to the app
         
-        byte_array = self.buffer.pop(self.expect_recieve)
-        self.expect_recieve += 1
+        byte_array = self.buffer.pop(self.expect_receive)
+        self.expect_receive += 1
         return byte_array
 
     def close(self) -> None:
         """Cleans up. It should block (wait) until the Streamer is done with all
            the necessary ACKs and retransmissions"""
         # your code goes here, especially after you add ACKs and retransmissions.
+
+        headers = struct.pack('i??', self.seq_num, False, True)
+            
+        packed_data = headers
+        self.socket.sendto(packed_data, (self.dst_ip, self.dst_port))
+
+        timeout = 0.25
+        start_time = time.time()
+            #wait until i get an ack for the packet that I just sent
+        while self.seq_num not in self.received_acks:
+            if time.time() - start_time > timeout:
+                self.socket.sendto(packed_data, (self.dst_ip, self.dst_port))
+                start_time = time.time()
+
+        time.sleep(2)
         self.closed = True
         self.socket.stoprecv()
+        return
