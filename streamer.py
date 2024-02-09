@@ -8,28 +8,19 @@ import traceback
 import time
 import hashlib
 
-def create_packet(seq_num,ack,fin,segment_data = None):
+def create_packet(seq_num,ack,fin,segment_data = b''):
     #create headers
     headers = struct.pack('i??', seq_num, ack, fin)
-    packed_data = None
-    if segment_data != None:
-        packed_data = headers + segment_data
-    else:
-        packed_data = headers
+    packed_data = headers + segment_data
     
     #compute the checksum(hash) of the pakcked data
     hash_object = hashlib.md5()
     hash_object.update(packed_data)
     hash_bytes = hash_object.digest()
     
-    header_with_hash = struct.pack('i??16s', seq_num, False, False,hash_bytes)
+    header_with_hash = struct.pack('i??16s', seq_num, ack, fin,hash_bytes)
     #packed_data_with_hash = header_with_hash  + segment_data
-    
-    packed_data_with_hash = None
-    if segment_data != None:
-        packed_data_with_hash = header_with_hash + segment_data
-    else:
-        packed_data_with_hash = header_with_hash
+    packed_data_with_hash = header_with_hash + segment_data
     
     return packed_data_with_hash
 class Streamer:
@@ -62,28 +53,22 @@ class Streamer:
         while not self.closed:
             try:
                 data, addr = self.socket.recvfrom()
+                
                 if data != b'':
-                    
                     unpacked_headers = struct.unpack('i??16s', data[:self.header_size])
-                    print(unpacked_headers)
+                    received_segment = data[self.header_size:]
+                    
+                    print("unpacked headers: ",unpacked_headers)
+                    print("received_segment: ",received_segment)
                     received_seq_num = unpacked_headers[0]
                     is_ack = unpacked_headers[1]
                     is_fin = unpacked_headers[2]
                     received_hash = unpacked_headers[3]
                     
-                    
-                    
-                    received_segment = data[self.header_size:]
-                    
-
-                    
                     #recreate headers
                     headers = struct.pack('i??', received_seq_num, is_ack, is_fin)
                     packed_data = None
-                    if len(received_segment) > 0:
-                        packed_data = headers + received_segment
-                    else:
-                        packed_data = headers
+                    packed_data = headers + received_segment
                         
                     #recompute the checksum(hash) of the packed data
                     hash_object = hashlib.md5()
@@ -91,10 +76,9 @@ class Streamer:
                     recreated_hash = hash_object.digest()
                     
                     print(recreated_hash)
-                    if recreated_hash == received_hash:
-                        print("this hash is fine")
-                    else:
+                    if recreated_hash != received_hash:
                         print("this hash is corrupt")
+                        continue
                     
                     
                     if is_ack:
@@ -225,6 +209,7 @@ class Streamer:
             if time.time() - start_time > timeout:
                 self.socket.sendto(fin_packet, (self.dst_ip, self.dst_port))
                 start_time = time.time()
+            time.sleep(0.01)
 
         time.sleep(2)
         self.closed = True
