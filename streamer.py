@@ -6,7 +6,32 @@ import struct
 import concurrent.futures
 import traceback
 import time
+import hashlib
 
+def create_packet(seq_num,ack,fin,segment_data = None):
+    #create headers
+    headers = struct.pack('i??', seq_num, ack, fin)
+    packed_data = None
+    if segment_data != None:
+        packed_data = headers + segment_data
+    else:
+        packed_data = headers
+    
+    #compute the checksum(hash) of the pakcked data
+    hash_object = hashlib.md5()
+    hash_object.update(packed_data)
+    hash_bytes = hash_object.digest()
+    
+    header_with_hash = struct.pack('i??16s', seq_num, False, False,hash_bytes)
+    #packed_data_with_hash = header_with_hash  + segment_data
+    
+    packed_data_with_hash = None
+    if segment_data != None:
+        packed_data_with_hash = header_with_hash + segment_data
+    else:
+        packed_data_with_hash = header_with_hash
+    
+    return packed_data_with_hash
 class Streamer:
     def __init__(self, dst_ip, dst_port,
                  src_ip=INADDR_ANY, src_port=0):
@@ -19,7 +44,7 @@ class Streamer:
         self.seq_num = 0
         self.expect_receive = 0
         self.closed = False
-        self.header_size = 6
+        self.header_size = 6 + 16
         
         #a dict of the seq number and byte value
         self.buffer = {}
@@ -31,22 +56,45 @@ class Streamer:
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         executor.submit(self.listener)
 
+        
+        
     def listener(self):
         while not self.closed:
             try:
                 data, addr = self.socket.recvfrom()
                 if data != b'':
-                    #unpacked_value = struct.unpack('i', data[:4])
                     
-                    #print(data[4])
-                    #unpacked_ack = struct.unpack('?', data[4])
-                    #print(unpacked_ack)
-                    
-                    unpacked_headers = struct.unpack('i??', data[:self.header_size])
+                    unpacked_headers = struct.unpack('i??16s', data[:self.header_size])
+                    print(unpacked_headers)
                     received_seq_num = unpacked_headers[0]
                     is_ack = unpacked_headers[1]
                     is_fin = unpacked_headers[2]
-                    print(received_seq_num,is_ack,is_fin)
+                    received_hash = unpacked_headers[3]
+                    
+                    
+                    
+                    received_segment = data[self.header_size:]
+                    
+
+                    
+                    #recreate headers
+                    headers = struct.pack('i??', received_seq_num, is_ack, is_fin)
+                    packed_data = None
+                    if len(received_segment) > 0:
+                        packed_data = headers + received_segment
+                    else:
+                        packed_data = headers
+                        
+                    #recompute the checksum(hash) of the packed data
+                    hash_object = hashlib.md5()
+                    hash_object.update(packed_data)
+                    recreated_hash = hash_object.digest()
+                    
+                    print(recreated_hash)
+                    if recreated_hash == received_hash:
+                        print("this hash is fine")
+                    else:
+                        print("this hash is corrupt")
                     
                     
                     if is_ack:
@@ -55,18 +103,23 @@ class Streamer:
 
                     elif is_fin:
                         print("this is a fin, sending fin-ack")
-                        headers = struct.pack('i??', received_seq_num, True, True)
-                        self.socket.sendto(headers, (self.dst_ip, self.dst_port))
+                        #headers = struct.pack('i??', received_seq_num, True, True)
+                        fin_ack_packet = create_packet(received_seq_num,True,True)
+                        self.socket.sendto(fin_ack_packet, (self.dst_ip, self.dst_port))
                         
                     else:
                         
                         # The rest is the list of bytes
-                        print("this is a data packet")
-                        byte_list_unpacked = data[self.header_size:]
-                        self.buffer[received_seq_num] = byte_list_unpacked
+                        
+                        
+                        print("received a data packet")
+                        
+                        self.buffer[received_seq_num] = received_segment
                         print("sending ack")
-                        headers = struct.pack('i??', received_seq_num, True, False)
-                        self.socket.sendto(headers, (self.dst_ip, self.dst_port))
+                        
+                        ack_packet = create_packet(received_seq_num,True,False)
+                        #headers = struct.pack('i??', received_seq_num, True, False)
+                        self.socket.sendto(ack_packet, (self.dst_ip, self.dst_port))
                         
                 
             except Exception as e:
@@ -92,21 +145,29 @@ class Streamer:
 
         
         for segment in segmented_bytes:
-            #packed_value = struct.pack('i', self.seq_num)
-            #is_ack_value = struct.pack("?", False)
-
             
+            '''
+            #create headers
             headers = struct.pack('i??', self.seq_num, False, False)
-            
             packed_data = headers + segment
-            self.socket.sendto(packed_data, (self.dst_ip, self.dst_port))
+            #compute the checksum(hash) of the pakcked data
+            hash_object = hashlib.md5()
+            hash_object.update(packed_data)
+            hash_bytes = hash_object.digest()
+            
+            header_with_hash = struct.pack('i??16s', self.seq_num, False, False,hash_bytes)
+            packed_data_with_hash = header_with_hash  + segment
+            '''
+            packet_data = create_packet(self.seq_num,False,False,segment)
+            
+            self.socket.sendto(packet_data, (self.dst_ip, self.dst_port))
             
             timeout = 0.25
             start_time = time.time()
             #wait until i get an ack for the packet that I just sent
             while self.seq_num not in self.received_acks:
                 if time.time() - start_time > timeout:
-                    self.socket.sendto(packed_data, (self.dst_ip, self.dst_port))
+                    self.socket.sendto(packet_data, (self.dst_ip, self.dst_port))
                     start_time = time.time()
 
             
@@ -151,17 +212,18 @@ class Streamer:
            the necessary ACKs and retransmissions"""
         # your code goes here, especially after you add ACKs and retransmissions.
 
-        headers = struct.pack('i??', self.seq_num, False, True)
-            
-        packed_data = headers
-        self.socket.sendto(packed_data, (self.dst_ip, self.dst_port))
+        #headers = struct.pack('i??', self.seq_num, False, True)
+        
+        #packed_data = headers
+        fin_packet = create_packet(self.seq_num,False,True)
+        self.socket.sendto(fin_packet, (self.dst_ip, self.dst_port))
 
         timeout = 0.25
         start_time = time.time()
             #wait until i get an ack for the packet that I just sent
         while self.seq_num not in self.received_acks:
             if time.time() - start_time > timeout:
-                self.socket.sendto(packed_data, (self.dst_ip, self.dst_port))
+                self.socket.sendto(fin_packet, (self.dst_ip, self.dst_port))
                 start_time = time.time()
 
         time.sleep(2)
