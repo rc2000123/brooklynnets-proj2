@@ -7,6 +7,7 @@ import concurrent.futures
 import traceback
 import time
 import hashlib
+from threading import Timer
 
 def create_packet(seq_num,ack,fin,segment_data = b''):
     #create headers
@@ -36,6 +37,8 @@ class Streamer:
         self.expect_receive = 0
         self.closed = False
         self.header_size = 6 + 16
+
+        self.packets_sent = []
         
         #a dict of the seq number and byte value
         self.buffer = {}
@@ -48,7 +51,13 @@ class Streamer:
         executor.submit(self.listener)
 
         
+    def retransmit(self):
         
+        
+        for i in range(self.base, len(self.packets_sent)):
+            self.socket.sendto(self.packets_sent[i], (self.dst_ip, self.dst_port))
+
+            
     def listener(self):
         while not self.closed:
             try:
@@ -58,8 +67,8 @@ class Streamer:
                     unpacked_headers = struct.unpack('i??16s', data[:self.header_size])
                     received_segment = data[self.header_size:]
                     
-                    print("unpacked headers: ",unpacked_headers)
-                    print("received_segment: ",received_segment)
+                    # print("unpacked headers: ",unpacked_headers)
+                    # print("received_segment: ",received_segment)
                     received_seq_num = unpacked_headers[0]
                     is_ack = unpacked_headers[1]
                     is_fin = unpacked_headers[2]
@@ -75,18 +84,18 @@ class Streamer:
                     hash_object.update(packed_data)
                     recreated_hash = hash_object.digest()
                     
-                    print(recreated_hash)
+                    # print(recreated_hash)
                     if recreated_hash != received_hash:
-                        print("this hash is corrupt")
+                        # print("this hash is corrupt")
                         continue
                     
                     
                     if is_ack:
-                        print("this is an ack")
+                        # print("this is an ack")
                         self.received_acks[received_seq_num] = True
 
                     elif is_fin:
-                        print("this is a fin, sending fin-ack")
+                        # print("this is a fin, sending fin-ack")
                         #headers = struct.pack('i??', received_seq_num, True, True)
                         fin_ack_packet = create_packet(received_seq_num,True,True)
                         self.socket.sendto(fin_ack_packet, (self.dst_ip, self.dst_port))
@@ -94,12 +103,23 @@ class Streamer:
                     else:
                         
                         # The rest is the list of bytes
+
+                        if received_seq_num in self.buffer:
+                            continue
+
                         
                         
-                        print("received a data packet")
+                        # print("received a data packet")
                         
                         self.buffer[received_seq_num] = received_segment
-                        print("sending ack")
+                        # print("sending ack")
+
+                        if received_seq_num != self.expect_receive:
+                            val = self.expect_receive - 1
+
+                        else:
+                            val = received_seq_num
+
                         
                         ack_packet = create_packet(received_seq_num,True,False)
                         #headers = struct.pack('i??', received_seq_num, True, False)
@@ -107,7 +127,7 @@ class Streamer:
                         
                 
             except Exception as e:
-                print("listener died!")
+                # print("listener died!")
                 print(e)
                 traceback.print_exc()
 
@@ -127,32 +147,31 @@ class Streamer:
         if len(data_bytes) > 0:
             segmented_bytes.append(data_bytes)
 
-        
+        self.base = 0
+        t = Timer(0.25, self.retransmit)
+        t.start()
+
         for segment in segmented_bytes:
             
-            '''
-            #create headers
-            headers = struct.pack('i??', self.seq_num, False, False)
-            packed_data = headers + segment
-            #compute the checksum(hash) of the pakcked data
-            hash_object = hashlib.md5()
-            hash_object.update(packed_data)
-            hash_bytes = hash_object.digest()
+           
+            packet_data = create_packet(self.seq_num, False, False, segment)
             
-            header_with_hash = struct.pack('i??16s', self.seq_num, False, False,hash_bytes)
-            packed_data_with_hash = header_with_hash  + segment
-            '''
-            packet_data = create_packet(self.seq_num,False,False,segment)
-            
+            self.packets_sent.append(packet_data)
             self.socket.sendto(packet_data, (self.dst_ip, self.dst_port))
+
             
-            timeout = 0.25
-            start_time = time.time()
-            #wait until i get an ack for the packet that I just sent
-            while self.seq_num not in self.received_acks:
-                if time.time() - start_time > timeout:
-                    self.socket.sendto(packet_data, (self.dst_ip, self.dst_port))
-                    start_time = time.time()
+            # timeout = 0.25
+            # start_time = time.time()
+            # #wait until i get an ack for the packet that I just sent
+            if self.base in self.received_acks:
+                t.cancel()
+                self.base += 1
+                t = Timer(0.25, self.retransmit)
+                t.start()
+
+            # while self.seq_num not in self.received_acks:
+            #     time.sleep(0.01)
+
 
             
             self.seq_num += 1
@@ -199,6 +218,7 @@ class Streamer:
         #headers = struct.pack('i??', self.seq_num, False, True)
         
         #packed_data = headers
+        
         fin_packet = create_packet(self.seq_num,False,True)
         self.socket.sendto(fin_packet, (self.dst_ip, self.dst_port))
 
